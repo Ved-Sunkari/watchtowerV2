@@ -133,6 +133,19 @@ if location_query:
         max_lon = center_lon + lon_delta
 
         st.map(pd.DataFrame({"lat": [center_lat], "lon": [center_lon]}), zoom=8)
+
+        # Heads up if the geocoded point is way bigger than the search radius
+        # (e.g. typing a whole province/state name returns one centroid point,
+        # and a small radius around it can miss real fire activity entirely).
+        if any(tok in display_name for tok in [
+            "Province", "State", "Territory", "Region"
+        ]) and "," not in display_name.split(",")[0]:
+            st.info(
+                "📌 Heads up: this resolved to a broad region, not a specific town. "
+                "A small search radius around its centroid may miss fires that "
+                "occurred elsewhere in the region. Try a specific city/town name "
+                "or increase the radius."
+            )
     else:
         st.error("Couldn't find that location — try being more specific.")
 
@@ -151,7 +164,26 @@ def fetch_firms(api_key, source, area, start_date, days):
     r = requests.get(url, timeout=30)
     r.raise_for_status()
 
-    return pd.read_csv(StringIO(r.text))
+    text = r.text.strip()
+    first_line = text.splitlines()[0] if text else ""
+
+    # FIRMS returns errors (bad key, bad source/area, etc.) as plain text
+    # with a 200 OK status, so raise_for_status() above never catches them.
+    # Without this check, pd.read_csv silently parses the error string as
+    # a 1-column, 0-row header and you get a misleading "0 detections".
+    if not text or "Invalid" in first_line or "Error" in first_line:
+        raise ValueError(f"FIRMS rejected the request: {first_line!r}")
+
+    df = pd.read_csv(StringIO(text))
+
+    expected = {"latitude", "longitude", "acq_date", "frp"}
+    if not expected.issubset(df.columns):
+        raise ValueError(
+            f"Unexpected FIRMS response (no fire-detection columns found). "
+            f"Got columns: {list(df.columns)} | raw start: {text[:200]!r}"
+        )
+
+    return df, url
 
 
 firms_df = None
@@ -172,8 +204,9 @@ if st.button("Fetch FIRMS Data"):
 
         delta = end_date - start_date
         dfs = []
+        debug_requests = []  # (url, status) pairs for the debug panel
 
-        # FIRMS works best in chunks
+        # FIRMS area API caps DAY_RANGE at 5, so we chunk in 5-day windows
         for i in range(0, delta.days + 1, 5):
 
             chunk_start = start_date + timedelta(days=i)
@@ -185,7 +218,7 @@ if st.button("Fetch FIRMS Data"):
             chunk_days = (chunk_end - chunk_start).days + 1
 
             try:
-                df_chunk = fetch_firms(
+                df_chunk, used_url = fetch_firms(
                     FIRMS_API_KEY,
                     satellite,
                     area,
@@ -194,12 +227,25 @@ if st.button("Fetch FIRMS Data"):
                 )
 
                 dfs.append(df_chunk)
+                debug_requests.append((used_url, f"OK — {len(df_chunk)} rows"))
 
             except Exception as e:
                 st.warning(
                     f"Could not fetch data for "
                     f"{chunk_start} - {chunk_end}: {e}"
                 )
+                debug_requests.append((
+                    f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/"
+                    f"{FIRMS_API_KEY}/{satellite}/{area}/{chunk_days}/"
+                    f"{chunk_start.strftime('%Y-%m-%d')}",
+                    f"FAILED — {e}"
+                ))
+
+        with st.expander("🔍 Debug: requests sent to FIRMS"):
+            st.write(f"Bounding box (west,south,east,north): `{area}`")
+            for u, status in debug_requests:
+                st.code(u)
+                st.caption(status)
 
         if dfs:
             firms_df = pd.concat(dfs, ignore_index=True)
@@ -209,9 +255,9 @@ if st.button("Fetch FIRMS Data"):
                 firms_df = firms_df.convert_dtypes(
                     dtype_backend="numpy_nullable"
                 )
-            
+
                 dates = firms_df["acq_date"].astype(str).tolist()
-            
+
                 times = (
                     firms_df["acq_time"]
                     .fillna(0)
@@ -220,16 +266,24 @@ if st.button("Fetch FIRMS Data"):
                     .str.zfill(4)
                     .tolist()
                 )
-            
+
                 firms_df["timestamp_utc"] = [
                     f"{d} {t[:2]}:{t[2:]} UTC"
                     for d, t in zip(dates, times)
                 ]
             st.session_state["firms"] = firms_df
 
-            st.success(
-                f"Loaded {len(firms_df)} FIRMS detections"
-            )
+            if len(firms_df) == 0:
+                st.warning(
+                    "FIRMS returned valid (empty) results — no detections in "
+                    "this area/date/source combo. Check the debug panel above: "
+                    "copy one of the URLs into your browser to confirm, and try "
+                    "widening the radius or double-checking the location."
+                )
+            else:
+                st.success(
+                    f"Loaded {len(firms_df)} FIRMS detections"
+                )
 
         else:
             st.error("No FIRMS detections found.")
