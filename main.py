@@ -206,23 +206,25 @@ if st.button("Fetch FIRMS Data"):
 
             if "acq_date" in firms_df.columns and "acq_time" in firms_df.columns:
 
-                firms_df["acq_time"] = (
+                firms_df = firms_df.convert_dtypes(
+                    dtype_backend="numpy_nullable"
+                )
+            
+                dates = firms_df["acq_date"].astype(str).tolist()
+            
+                times = (
                     firms_df["acq_time"]
                     .fillna(0)
                     .astype(int)
                     .astype(str)
                     .str.zfill(4)
+                    .tolist()
                 )
             
-                firms_df["timestamp_utc"] = firms_df.apply(
-                    lambda row: (
-                        f"{row['acq_date']} "
-                        f"{row['acq_time'][:2]}:"
-                        f"{row['acq_time'][2:]} UTC"
-                    ),
-                    axis=1
-                )
-
+                firms_df["timestamp_utc"] = [
+                    f"{d} {t[:2]}:{t[2:]} UTC"
+                    for d, t in zip(dates, times)
+                ]
             st.session_state["firms"] = firms_df
 
             st.success(
