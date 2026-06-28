@@ -3,6 +3,7 @@ import os
 import time
 import base64
 import io
+import math
 import requests
 import pandas as pd
 from PIL import Image
@@ -67,20 +68,15 @@ if uploaded_image:
     base64_image = base64.b64encode(buffer.getvalue()).decode()
 
 # =========================
-# FIRMS DATA INPUT
+# LOCATION INPUT
 # =========================
-st.subheader("🔥 FIRMS Sensor Data")
+st.subheader("📍 Location")
 
-col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-    min_lat = st.number_input("Min Lat", value=34.0)
-with col2:
-    min_lon = st.number_input("Min Lon", value=-120.0)
-with col3:
-    max_lat = st.number_input("Max Lat", value=38.0)
-with col4:
-    max_lon = st.number_input("Max Lon", value=-115.0)
+location_query = st.text_input(
+    "Enter a location",
+    placeholder="e.g. Paradise, California or Lake Tahoe"
+)
+radius_km = st.slider("Search radius (km)", min_value=5, max_value=150, value=30)
 
 satellite = st.selectbox(
     "Satellite Source",
@@ -88,6 +84,43 @@ satellite = st.selectbox(
 )
 
 start_date = st.date_input("Start Date")
+
+
+@st.cache_data(ttl=3600)
+def geocode_location(query):
+    url = "https://nominatim.openstreetmap.org/search"
+    params = {"q": query, "format": "json", "limit": 1}
+    headers = {"User-Agent": "watchtower-wildfire-app"}  # Nominatim requires a User-Agent
+    r = requests.get(url, params=params, headers=headers, timeout=10)
+    results = r.json()
+    if not results:
+        return None
+    return float(results[0]["lat"]), float(results[0]["lon"]), results[0]["display_name"]
+
+
+min_lat = min_lon = max_lat = max_lon = None
+center_lat = center_lon = None
+
+if location_query:
+    geo = geocode_location(location_query)
+    if geo:
+        center_lat, center_lon, display_name = geo
+        st.success(f"📍 {display_name}")
+
+        # Convert a radius in km to a lat/lon bounding box.
+        # Longitude degrees shrink as you move away from the equator,
+        # so we correct using cos(latitude).
+        lat_delta = radius_km / 111.0
+        lon_delta = radius_km / (111.0 * math.cos(math.radians(center_lat)))
+
+        min_lat = center_lat - lat_delta
+        max_lat = center_lat + lat_delta
+        min_lon = center_lon - lon_delta
+        max_lon = center_lon + lon_delta
+
+        st.map(pd.DataFrame({"lat": [center_lat], "lon": [center_lon]}), zoom=8)
+    else:
+        st.error("Couldn't find that location — try being more specific.")
 
 
 # =========================
@@ -103,6 +136,10 @@ def fetch_firms(api_key, source, area, start_date, days=1):
 firms_df = None
 
 if st.button("Fetch FIRMS Data"):
+    if min_lat is None:
+        st.warning("Enter a valid location first.")
+        st.stop()
+
     area = f"{min_lon},{min_lat},{max_lon},{max_lat}"
     firms_df = fetch_firms(FIRMS_API_KEY, satellite, area, start_date.strftime("%Y-%m-%d"))
     st.session_state["firms"] = firms_df
