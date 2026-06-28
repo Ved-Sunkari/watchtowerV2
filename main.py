@@ -83,7 +83,21 @@ satellite = st.selectbox(
     ["VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT", "MODIS_NRT"]
 )
 
-start_date = st.date_input("Start Date")
+from datetime import datetime, timedelta
+
+col1, col2 = st.columns(2)
+
+with col1:
+    start_date = st.date_input(
+        "Start Date",
+        datetime.utcnow() - timedelta(days=3)
+    )
+
+with col2:
+    end_date = st.date_input(
+        "End Date",
+        datetime.utcnow()
+    )
 
 
 @st.cache_data(ttl=3600)
@@ -126,24 +140,98 @@ if location_query:
 # =========================
 # FIRMS FETCH FUNCTION
 # =========================
+
 @st.cache_data(ttl=300)
-def fetch_firms(api_key, source, area, start_date, days=1):
-    url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{api_key}/{source}/{area}/{days}/{start_date}"
-    r = requests.get(url)
+def fetch_firms(api_key, source, area, start_date, days):
+    url = (
+        f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/"
+        f"{api_key}/{source}/{area}/{days}/{start_date}"
+    )
+
+    r = requests.get(url, timeout=30)
+    r.raise_for_status()
+
     return pd.read_csv(StringIO(r.text))
 
 
 firms_df = None
 
 if st.button("Fetch FIRMS Data"):
+
     if min_lat is None:
         st.warning("Enter a valid location first.")
         st.stop()
 
-    area = f"{min_lon},{min_lat},{max_lon},{max_lat}"
-    firms_df = fetch_firms(FIRMS_API_KEY, satellite, area, start_date.strftime("%Y-%m-%d"))
-    st.session_state["firms"] = firms_df
-    st.success(f"Loaded {len(firms_df)} FIRMS detections")
+    if end_date < start_date:
+        st.error("End date must be after start date.")
+        st.stop()
+
+    with st.spinner("Fetching FIRMS detections..."):
+
+        area = f"{min_lon},{min_lat},{max_lon},{max_lat}"
+
+        delta = end_date - start_date
+        dfs = []
+
+        # FIRMS works best in chunks
+        for i in range(0, delta.days + 1, 5):
+
+            chunk_start = start_date + timedelta(days=i)
+            chunk_end = min(
+                start_date + timedelta(days=i + 4),
+                end_date
+            )
+
+            chunk_days = (chunk_end - chunk_start).days + 1
+
+            try:
+                df_chunk = fetch_firms(
+                    FIRMS_API_KEY,
+                    satellite,
+                    area,
+                    chunk_start.strftime("%Y-%m-%d"),
+                    chunk_days
+                )
+
+                dfs.append(df_chunk)
+
+            except Exception as e:
+                st.warning(
+                    f"Could not fetch data for "
+                    f"{chunk_start} - {chunk_end}: {e}"
+                )
+
+        if dfs:
+            firms_df = pd.concat(dfs, ignore_index=True)
+
+            if (
+                "acq_time" in firms_df.columns
+                and "acq_date" in firms_df.columns
+            ):
+
+                firms_df["acq_time"] = (
+                    firms_df["acq_time"]
+                    .astype(str)
+                    .str.zfill(4)
+                )
+
+                firms_df["timestamp_utc"] = (
+                    firms_df["acq_date"]
+                    + " "
+                    + firms_df["acq_time"].str[:2]
+                    + ":"
+                    + firms_df["acq_time"].str[2:]
+                    + " UTC"
+                )
+
+            st.session_state["firms"] = firms_df
+
+            st.success(
+                f"Loaded {len(firms_df)} FIRMS detections"
+            )
+
+        else:
+            st.error("No FIRMS detections found.")
 
 firms_df = st.session_state.get("firms")
 
