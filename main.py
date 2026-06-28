@@ -204,24 +204,23 @@ if st.button("Fetch FIRMS Data"):
         if dfs:
             firms_df = pd.concat(dfs, ignore_index=True)
 
-            if (
-                "acq_time" in firms_df.columns
-                and "acq_date" in firms_df.columns
-            ):
+            if "acq_date" in firms_df.columns and "acq_time" in firms_df.columns:
 
                 firms_df["acq_time"] = (
                     firms_df["acq_time"]
+                    .fillna(0)
+                    .astype(int)
                     .astype(str)
                     .str.zfill(4)
                 )
-
-                firms_df["timestamp_utc"] = (
-                    firms_df["acq_date"]
-                    + " "
-                    + firms_df["acq_time"].str[:2]
-                    + ":"
-                    + firms_df["acq_time"].str[2:]
-                    + " UTC"
+            
+                firms_df["timestamp_utc"] = firms_df.apply(
+                    lambda row: (
+                        f"{row['acq_date']} "
+                        f"{row['acq_time'][:2]}:"
+                        f"{row['acq_time'][2:]} UTC"
+                    ),
+                    axis=1
                 )
 
             st.session_state["firms"] = firms_df
